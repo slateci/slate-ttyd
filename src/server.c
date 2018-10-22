@@ -21,6 +21,9 @@
 #define TTYD_VERSION "unknown"
 #endif
 
+int
+encode_auth(const char* credential);
+
 volatile bool force_exit = false;
 struct lws_context *context;
 struct tty_server *server;
@@ -292,11 +295,8 @@ main(int argc, char **argv) {
                 iface[sizeof(iface) - 1] = '\0';
                 break;
             case 'c':
-                if (strchr(optarg, ':') == NULL) {
-                    fprintf(stderr, "ttyd: invalid credential, format: username:password\n");
-                    return -1;
-                }
-                server->credential = base64_encode((const unsigned char *) optarg, strlen(optarg));
+                server->credential = (char*)malloc(strlen(optarg)+1);
+                strncpy(server->credential,optarg,strlen(optarg));
                 break;
             case 'u':
                 info.uid = atoi(optarg);
@@ -456,6 +456,11 @@ main(int argc, char **argv) {
     if (server->index != NULL) {
         lwsl_notice("  custom index.html: %s\n", server->index);
     }
+	
+	if (encode_auth(server->credential)) {
+		lwsl_err("Failed to encode credentials into index.html\n");
+        return 1;
+	}
 
     signal(SIGINT, sig_handler);  // ^C
     signal(SIGTERM, sig_handler); // kill

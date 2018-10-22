@@ -5,49 +5,55 @@
 #include "html.h"
 
 int
+encode_auth(const char* credential){
+	const static char marker[]="TTY_AUTH_TOKEN";
+	char* insert_ptr = strstr((char*)index_html, marker);
+	if (!insert_ptr) { //if unable to find an insert point, nothing to do
+		printf("Did not find credential insertion point\n");
+		return 0;
+	}
+	printf("Found insertion point\n");
+	size_t len_written=0;
+	if (credential) {
+		size_t len = strlen(credential);
+		if (len>64u) //credential too long; would overflow
+			return 1;
+		*insert_ptr++='\'';
+		memcpy((void*)insert_ptr,(void*)credential,len);
+		insert_ptr+=len;
+		*insert_ptr++='\'';
+		len_written=len+2;
+	}
+	else {
+		len_written=6;
+		memcpy((void*)insert_ptr,(void*)"null",len_written);
+		insert_ptr+=len_written;
+	}
+	if (len_written<sizeof(marker))
+		memset(insert_ptr,0x20,sizeof(marker)-len_written);
+	return 0;
+}
+
+int
 check_auth(struct lws *wsi) {
     if (server->credential == NULL)
         return 0;
 
-    int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
-    char buf[hdr_length + 1];
-    int len = lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_AUTHORIZATION);
-    if (len > 0) {
-        // extract base64 text from authorization header
-        char *ptr = &buf[0];
-        char *token, *b64_text = NULL;
-        int i = 1;
-        while ((token = strsep(&ptr, " ")) != NULL) {
-            if (strlen(token) == 0)
-                continue;
-            if (i++ == 2) {
-                b64_text = token;
-                break;
-            }
-        }
-        if (b64_text != NULL && !strcmp(b64_text, server->credential))
-            return 0;
-    }
-
-    unsigned char buffer[1024 + LWS_PRE], *p, *end;
-    p = buffer + LWS_PRE;
-    end = p + sizeof(buffer) - LWS_PRE;
-
-    if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end))
-        return 1;
-    if (lws_add_http_header_by_token(wsi,
-                                     WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-                                     (unsigned char *) "Basic realm=\"ttyd\"",
-                                     18, &p, end))
-        return 1;
-    if (lws_add_http_header_content_length(wsi, 0, &p, end))
-        return 1;
-    if (lws_finalize_http_header(wsi, &p, end))
-        return 1;
-    if (lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-        return 1;
-
-    return -1;
+	char buf[LWS_PRE + 256];
+	char* value = lws_get_urlarg_by_name(wsi, "auth", buf, sizeof(buf));
+	if (!value){
+		printf("parameter missing\n");
+		return 1;
+	}
+	if(*value=='=')
+		value++;
+	printf("Got parameter: %s\n",value);
+	if (strcmp(value,server->credential)){
+		printf("token does not match\n");
+		return 1;
+	}
+	printf("token matches\n");
+	return 0;
 }
 
 int
