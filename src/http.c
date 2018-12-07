@@ -65,7 +65,7 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, voi
     switch (reason) {
         case LWS_CALLBACK_HTTP:
             // only GET method is allowed
-            if (!lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) || len < 1) {
+            if (/*!lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) ||*/ len < 1) {
                 lwsl_notice("Request which is not a GET or has len<1\n"
                             "reason: %i  len: %zu  path: %s\n", reason, len, in);
                 lws_return_http_status(wsi, HTTP_STATUS_BAD_REQUEST, NULL);
