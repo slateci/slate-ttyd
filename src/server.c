@@ -8,9 +8,6 @@
 #include <signal.h>
 #include <sys/stat.h>
 
-#ifdef HAVE_LWS_CONFIG_H
-#include "lws_config.h"
-#endif
 #include <libwebsockets.h>
 #include <json.h>
 
@@ -53,6 +50,7 @@ static const struct option options[] = {
         {"signal-list",  no_argument,       NULL,  1},
         {"reconnect",    required_argument, NULL, 'r'},
         {"index",        required_argument, NULL, 'I'},
+        {"ipv6",         no_argument, NULL, '6'},
         {"ssl",          no_argument,       NULL, 'S'},
         {"ssl-cert",     required_argument, NULL, 'C'},
         {"ssl-key",      required_argument, NULL, 'K'},
@@ -67,7 +65,7 @@ static const struct option options[] = {
         {"help",         no_argument,       NULL, 'h'},
         {NULL,           0,                 0,     0}
 };
-static const char *opt_string = "p:i:c:u:g:s:r:I:aSC:K:A:Rt:T:Om:oBd:vh";
+static const char *opt_string = "p:i:c:u:g:s:r:I:6aSC:K:A:Rt:T:Om:oBd:vh";
 
 void print_help() {
     fprintf(stderr, "ttyd is a tool for sharing terminal over the web\n\n"
@@ -91,6 +89,7 @@ void print_help() {
                     "    -o, --once              Accept only one client and exit on disconnection\n"
                     "    -B, --browser           Open terminal with the default system browser\n"
                     "    -I, --index             Custom index.html path\n"
+                    "    -6, --ipv6              Enable IPv6 support\n"
                     "    -S, --ssl               Enable SSL\n"
                     "    -C, --ssl-cert          SSL certificate file path\n"
                     "    -K, --ssl-key           SSL key file path\n"
@@ -242,7 +241,7 @@ main(int argc, char **argv) {
     info.gid = -1;
     info.uid = -1;
     info.max_http_header_pool = 16;
-    info.options = LWS_SERVER_OPTION_VALIDATE_UTF8;
+    info.options = LWS_SERVER_OPTION_VALIDATE_UTF8 | LWS_SERVER_OPTION_DISABLE_IPV6;
     info.extensions = extensions;
 
     int debug_level = LLL_ERR | LLL_WARN | LLL_NOTICE;
@@ -339,6 +338,9 @@ main(int argc, char **argv) {
                     fprintf(stderr, "Invalid index.html path: %s, is it a dir?\n", server->index);
                     return -1;
                 }
+                break;
+            case '6':
+                info.options &= ~(LWS_SERVER_OPTION_DISABLE_IPV6);
                 break;
             case 'S':
                 ssl = true;
