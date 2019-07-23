@@ -41,31 +41,32 @@ static const struct lws_extension extensions[] = {
 
 // command line options
 static const struct option options[] = {
-        {"port",         required_argument, NULL, 'p'},
-        {"interface",    required_argument, NULL, 'i'},
-        {"credential",   required_argument, NULL, 'c'},
-        {"uid",          required_argument, NULL, 'u'},
-        {"gid",          required_argument, NULL, 'g'},
-        {"signal",       required_argument, NULL, 's'},
-        {"signal-list",  no_argument,       NULL,  1},
-        {"reconnect",    required_argument, NULL, 'r'},
-        {"index",        required_argument, NULL, 'I'},
-        {"ipv6",         no_argument, NULL, '6'},
-        {"ssl",          no_argument,       NULL, 'S'},
-        {"ssl-cert",     required_argument, NULL, 'C'},
-        {"ssl-key",      required_argument, NULL, 'K'},
-        {"ssl-ca",       required_argument, NULL, 'A'},
-        {"readonly",     no_argument,       NULL, 'R'},
-        {"check-origin", no_argument,       NULL, 'O'},
-        {"max-clients",  required_argument, NULL, 'm'},
-        {"once",         no_argument,       NULL, 'o'},
-        {"browser",      no_argument,       NULL, 'B'},
-        {"debug",        required_argument, NULL, 'd'},
-        {"version",      no_argument,       NULL, 'v'},
-        {"help",         no_argument,       NULL, 'h'},
-        {NULL,           0,                 0,     0}
+        {"port",          required_argument, NULL, 'p'},
+        {"interface",     required_argument, NULL, 'i'},
+        {"credential",    required_argument, NULL, 'c'},
+        {"uid",           required_argument, NULL, 'u'},
+        {"gid",           required_argument, NULL, 'g'},
+        {"signal",        required_argument, NULL, 's'},
+        {"index",         required_argument, NULL, 'I'},
+        {"ipv6",          no_argument,       NULL, '6'},
+        {"ssl",           no_argument,       NULL, 'S'},
+        {"ssl-cert",      required_argument, NULL, 'C'},
+        {"ssl-key",       required_argument, NULL, 'K'},
+        {"ssl-ca",        required_argument, NULL, 'A'},
+        {"url-arg",       no_argument,       NULL, 'a'},
+        {"readonly",      no_argument,       NULL, 'R'},
+        {"terminal-type", required_argument, NULL, 'T'},
+        {"client-option", required_argument, NULL, 't'},
+        {"check-origin",  no_argument,       NULL, 'O'},
+        {"max-clients",   required_argument, NULL, 'm'},
+        {"once",          no_argument,       NULL, 'o'},
+        {"browser",       no_argument,       NULL, 'B'},
+        {"debug",         required_argument, NULL, 'd'},
+        {"version",       no_argument,       NULL, 'v'},
+        {"help",          no_argument,       NULL, 'h'},
+        {NULL, 0, 0,                               0}
 };
-static const char *opt_string = "p:i:c:u:g:s:r:I:6aSC:K:A:Rt:T:Om:oBd:vh";
+static const char *opt_string = "p:i:c:u:g:s:I:6aSC:K:A:Rt:T:Om:oBd:vh";
 
 void print_help() {
     fprintf(stderr, "ttyd is a tool for sharing terminal over the web\n\n"
@@ -80,7 +81,7 @@ void print_help() {
                     "    -u, --uid               User id to run with\n"
                     "    -g, --gid               Group id to run with\n"
                     "    -s, --signal            Signal to send to the command when exit it (default: 1, SIGHUP)\n"
-                    "    -r, --reconnect         Time to reconnect for the client in seconds (default: 10)\n"
+                    "    -a, --url-arg           Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)\n"
                     "    -R, --readonly          Do not allow clients to write to the TTY\n"
                     "    -t, --client-option     Send option to client (format: key=value), repeat to add more options\n"
                     "    -T, --terminal-type     Terminal type to report, default: xterm-256color\n"
@@ -89,7 +90,9 @@ void print_help() {
                     "    -o, --once              Accept only one client and exit on disconnection\n"
                     "    -B, --browser           Open terminal with the default system browser\n"
                     "    -I, --index             Custom index.html path\n"
+#ifdef LWS_WITH_IPV6
                     "    -6, --ipv6              Enable IPv6 support\n"
+#endif
                     "    -S, --ssl               Enable SSL\n"
                     "    -C, --ssl-cert          SSL certificate file path\n"
                     "    -K, --ssl-key           SSL key file path\n"
@@ -112,7 +115,6 @@ tty_server_new(int argc, char **argv, int start) {
     memset(ts, 0, sizeof(struct tty_server));
     LIST_INIT(&ts->clients);
     ts->client_count = 0;
-    ts->reconnect = 10;
     ts->sig_code = SIGHUP;
     sprintf(ts->terminal_type, "%s", "xterm-256color");
     get_sig_name(ts->sig_code, ts->sig_name, sizeof(ts->sig_name));
@@ -130,6 +132,7 @@ tty_server_new(int argc, char **argv, int start) {
         }
     }
     ts->argv[cmd_argc] = NULL;
+    ts->argc = cmd_argc;
 
     ts->command = xmalloc(cmd_len + 1);
     char *ptr = ts->command;
@@ -180,6 +183,15 @@ sig_handler(int sig) {
     force_exit = true;
     lws_cancel_service(context);
     lwsl_notice("send ^C to force exit.\n");
+}
+
+void
+sigchld_handler() {
+    pid_t pid;
+    int status = wait_proc(-1, &pid);
+    if (pid > 0) {
+        lwsl_notice("process exited with code %d, pid: %d\n", status, pid);
+    }
 }
 
 int
@@ -243,6 +255,7 @@ main(int argc, char **argv) {
     info.max_http_header_pool = 16;
     info.options = LWS_SERVER_OPTION_VALIDATE_UTF8 | LWS_SERVER_OPTION_DISABLE_IPV6;
     info.extensions = extensions;
+    info.max_http_header_data = 20480;
 
     int debug_level = LLL_ERR | LLL_WARN | LLL_NOTICE;
     char iface[128] = "";
@@ -266,6 +279,9 @@ main(int argc, char **argv) {
                 return 0;
             case 'd':
                 debug_level = atoi(optarg);
+                break;
+            case 'a':
+                server->url_arg = true;
                 break;
             case 'R':
                 server->readonly = true;
@@ -314,16 +330,9 @@ main(int argc, char **argv) {
                 }
             }
                 break;
-            case 'r':
-                server->reconnect = atoi(optarg);
-                if (server->reconnect <= 0) {
-                    fprintf(stderr, "ttyd: invalid reconnect: %s\n", optarg);
-                    return -1;
-                }
-                break;
             case 'I':
                 if (!strncmp(optarg, "~/", 2)) {
-                    const char* home = getenv("HOME");
+                    const char *home = getenv("HOME");
                     server->index = malloc(strlen(home) + strlen(optarg) - 1);
                     sprintf(server->index, "%s%s", home, optarg + 1);
                 } else {
@@ -419,19 +428,6 @@ main(int argc, char **argv) {
         info.ssl_cert_filepath = cert_path;
         info.ssl_private_key_filepath = key_path;
         info.ssl_ca_filepath = ca_path;
-        info.ssl_cipher_list = "ECDHE-ECDSA-AES256-GCM-SHA384:"
-                "ECDHE-RSA-AES256-GCM-SHA384:"
-                "DHE-RSA-AES256-GCM-SHA384:"
-                "ECDHE-RSA-AES256-SHA384:"
-                "HIGH:!aNULL:!eNULL:!EXPORT:"
-                "!DES:!MD5:!PSK:!RC4:!HMAC_SHA1:"
-                "!SHA1:!DHE-RSA-AES128-GCM-SHA256:"
-                "!DHE-RSA-AES128-SHA256:"
-                "!AES128-GCM-SHA256:"
-                "!AES128-SHA256:"
-                "!DHE-RSA-AES256-SHA256:"
-                "!AES256-GCM-SHA384:"
-                "!AES256-SHA256";
         if (strlen(info.ssl_ca_filepath) > 0)
             info.options |= LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
 #if LWS_LIBRARY_VERSION_MAJOR >= 2
@@ -446,9 +442,10 @@ main(int argc, char **argv) {
     lwsl_notice("  start command: %s\n", server->command);
     lwsl_notice("  close signal: %s (%d)\n", server->sig_name, server->sig_code);
     lwsl_notice("  terminal type: %s\n", server->terminal_type);
-    lwsl_notice("  reconnect timeout: %ds\n", server->reconnect);
     if (server->check_origin)
         lwsl_notice("  check origin: true\n");
+    if (server->url_arg)
+        lwsl_notice("  allow url arg: true\n");
     if (server->readonly)
         lwsl_notice("  readonly: true\n");
     if (server->max_clients > 0)
@@ -466,6 +463,7 @@ main(int argc, char **argv) {
 
     signal(SIGINT, sig_handler);  // ^C
     signal(SIGTERM, sig_handler); // kill
+    signal(SIGCHLD, sigchld_handler);
 
     context = lws_create_context(&info);
     if (context == NULL) {
@@ -485,8 +483,7 @@ main(int argc, char **argv) {
         if (!LIST_EMPTY(&server->clients)) {
             struct tty_client *client;
             LIST_FOREACH(client, &server->clients, list) {
-                if (client->running) {
-                    pthread_mutex_lock(&client->mutex);
+                if (client->running && pthread_mutex_trylock(&client->mutex)) {
                     if (client->state != STATE_DONE)
                         lws_callback_on_writable(client->wsi);
                     else

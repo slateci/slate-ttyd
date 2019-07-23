@@ -1,4 +1,4 @@
-# ttyd - Share your terminal over the web [![Build Status](https://travis-ci.org/tsl0922/ttyd.svg?branch=master)](https://travis-ci.org/tsl0922/ttyd)
+# ttyd - Share your terminal over the web [![Build Status](https://travis-ci.org/tsl0922/ttyd.svg?branch=master)](https://travis-ci.org/tsl0922/ttyd) [![Greenkeeper badge](https://badges.greenkeeper.io/tsl0922/ttyd.svg)](https://greenkeeper.io/)
 
 ttyd is a simple command-line tool for sharing terminal over the web, inspired by [GoTTY][1].
 
@@ -38,6 +38,10 @@ brew install ttyd
     ```
 
     You may also need to compile/install [libwebsockets][2] from source if the `libwebsockets-dev` package is outdated.
+    
+- Install on Gentoo:
+clone the repo at [https://bitbucket.org/mgpagano/ttyd/src/master/](https://bitbucket.org/mgpagano/ttyd/src/master/) and follow the directions [here](https://wiki.gentoo.org/wiki/Custom_repository#Creating_a_local_repository) for creating a local repository.
+
 
 ## Install on Windows
 
@@ -67,7 +71,7 @@ USAGE:
     ttyd [options] <command> [<arguments...>]
 
 VERSION:
-    1.4.2
+    1.5.1
 
 OPTIONS:
     -p, --port              Port to listen (default: 7681, use `0` for random port)
@@ -76,7 +80,7 @@ OPTIONS:
     -u, --uid               User id to run with
     -g, --gid               Group id to run with
     -s, --signal            Signal to send to the command when exit it (default: 1, SIGHUP)
-    -r, --reconnect         Time to reconnect for the client in seconds (default: 10)
+    -a, --url-arg           Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)
     -R, --readonly          Do not allow clients to write to the TTY
     -t, --client-option     Send option to client (format: key=value), repeat to add more options
     -T, --terminal-type     Terminal type to report, default: xterm-256color
@@ -127,7 +131,7 @@ openssl req -new -x509 -days 365 -key ca.key -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc
 
 # server certificate (for multiple domains, change subjectAltName to: DNS:example.com,DNS:www.example.com)
 openssl req -newkey rsa:2048 -nodes -keyout server.key -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=localhost" -out server.csr
-openssl x509 -req -extfile <(printf "subjectAltName=DNS:localhost") -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+openssl x509 -sha256 -req -extfile <(printf "subjectAltName=DNS:localhost") -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
 
 # client certificate (the p12/pem format may be useful for some clients)
 openssl req -newkey rsa:2048 -nodes -keyout client.key -subj "/C=CN/ST=GD/L=SZ/O=Acme, Inc./CN=client" -out client.csr

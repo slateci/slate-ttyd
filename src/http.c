@@ -4,6 +4,10 @@
 #include "server.h"
 #include "html.h"
 
+enum {
+    AUTH_OK, AUTH_FAIL, AUTH_ERROR
+};
+
 int
 encode_auth(const char* credential){
 	const static char marker[]="TTY_AUTH_TOKEN";
@@ -35,53 +39,55 @@ encode_auth(const char* credential){
 }
 
 int
-check_auth(struct lws *wsi) {
+check_auth(struct lws *wsi, struct pss_http *pss) {
     if (server->credential == NULL)
-        return 0;
+        return AUTH_OK;
 
 	char buf[LWS_PRE + 256];
 	const char* value = lws_get_urlarg_by_name(wsi, "auth", buf, sizeof(buf));
 	if (!value){
 		printf("parameter missing\n");
-		return 1;
+		return AUTH_FAIL;
 	}
 	if(*value=='=')
 		value++;
 	printf("Got parameter: %s\n",value);
 	if (strcmp(value,server->credential)){
 		printf("token does not match\n");
-		return 1;
+		return AUTH_FAIL;
 	}
 	printf("token matches\n");
-	return 0;
+	return AUTH_OK;
+}
+
+void access_log(struct lws *wsi, const char *path) {
+    char name[100], rip[50];
+#if LWS_LIBRARY_VERSION_MAJOR >=2 && LWS_LIBRARY_VERSION_MINOR >=4
+    struct lws *n_wsi = lws_get_network_wsi(wsi);
+#else
+    struct lws *n_wsi = wsi;
+#endif
+    lws_get_peer_addresses(wsi, lws_get_socket_fd(n_wsi), name, sizeof(name), rip, sizeof(rip));
+    lwsl_notice("HTTP %s - %s (%s)\n", path, rip, name);
 }
 
 int
 callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     struct pss_http *pss = (struct pss_http *) user;
     unsigned char buffer[4096 + LWS_PRE], *p, *end;
-    char buf[256], name[100], rip[50];
+    char buf[256];
+    bool done = false;
 
     switch (reason) {
         case LWS_CALLBACK_HTTP:
-            // only GET method is allowed
-            if (/*!lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) ||*/ len < 1) {
-                lwsl_notice("Request which is not a GET or has len<1\n"
-                            "reason: %i  len: %zu  path: %s\n", reason, len, in);
-                lws_return_http_status(wsi, HTTP_STATUS_BAD_REQUEST, NULL);
-                goto try_to_reuse;
-            }
-
-            snprintf(pss->path, sizeof(pss->path), "%s", (const char *)in);
-            lws_get_peer_addresses(wsi, lws_get_socket_fd(wsi), name, sizeof(name), rip, sizeof(rip));
-            lwsl_notice("HTTP %s - %s (%s)\n", (char *) in, rip, name);
-
-            switch (check_auth(wsi)) {
-                case 0:
+            access_log(wsi, (const char *) in);
+            snprintf(pss->path, sizeof(pss->path), "%s", (const char *) in);
+            switch (check_auth(wsi, pss)) {
+                case AUTH_OK:
                     break;
-                case -1:
-                    goto try_to_reuse;
-                case 1:
+                case AUTH_FAIL:
+                    return 0;
+                case AUTH_ERROR:
                 default:
                     return 1;
             }
@@ -90,8 +96,8 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, voi
             end = p + sizeof(buffer) - LWS_PRE;
 
             if (strncmp(pss->path, "/auth_token.js", 14) == 0) {
-                size_t n = server->credential != NULL ? sprintf(buf, "var tty_auth_token = '%s';", server->credential) : 0;
-
+                const char *credential = server->credential != NULL ? server->credential : "";
+                size_t n = sprintf(buf, "var tty_auth_token = '%s';\n", credential);
                 if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end))
                     return 1;
                 if (lws_add_http_header_by_token(wsi,
@@ -105,18 +111,10 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, voi
                     return 1;
                 if (lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
                     return 1;
-#if LWS_LIBRARY_VERSION_MAJOR < 3
-                if (n > 0 && lws_write_http(wsi, buf, n) < 0)
-                    return 1;
-                goto try_to_reuse;
-#else
-                if (n > 0) {
-                    pss->buffer = pss->ptr = strdup(buf);
-                    pss->len = n;
-                    lws_callback_on_writable(wsi);
-                }
-                return 0;
-#endif
+                pss->buffer = pss->ptr = strdup(buf);
+                pss->len = n;
+                lws_callback_on_writable(wsi);
+                break;
             }
 
             if (strcmp(pss->path, "/") != 0) {
@@ -140,7 +138,7 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, voi
                     return 1;
                 if (lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
                     return 1;
-#if LWS_LIBRARY_VERSION_MAJOR < 3
+#if LWS_LIBRARY_VERSION_MAJOR < 2
                 if (lws_write_http(wsi, index_html, index_html_len) < 0)
                     return 1;
                 goto try_to_reuse;
@@ -148,32 +146,48 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, voi
                 pss->buffer = pss->ptr = (char *) index_html;
                 pss->len = index_html_len;
                 lws_callback_on_writable(wsi);
-                return 0;
 #endif
             }
             break;
 
         case LWS_CALLBACK_HTTP_WRITEABLE:
-            if (pss->len <= 0)
-                goto try_to_reuse;
-
-            if (pss ->ptr - pss->buffer == pss->len) {
-                if (pss->buffer != (char *) index_html) free(pss->buffer);
+            if (!pss->buffer || pss->len <= 0) {
                 goto try_to_reuse;
             }
 
-            int n = sizeof(buffer) - LWS_PRE;
-            if (pss->ptr - pss->buffer + n > pss->len)
-                n = (int) (pss->len - (pss->ptr - pss->buffer));
-            memcpy(buffer + LWS_PRE, pss->ptr, n);
-            pss->ptr += n;
-            if (lws_write_http(wsi, buffer + LWS_PRE, (size_t) n) < n) {
-                if (pss->buffer != (char *) index_html) free(pss->buffer);
-                return -1;
+            do {
+                int n = sizeof(buffer) - LWS_PRE;
+                int m = lws_get_peer_write_allowance(wsi);
+                if (m == 0) {
+                    lws_callback_on_writable(wsi);
+                    return 0;
+                } else if (m != -1 && m < n) {
+                    n = m;
+                }
+                if (pss->ptr + n > pss->buffer + pss->len) {
+                    n = (int) (pss->len - (pss->ptr - pss->buffer));
+                    done = true;
+                }
+                memcpy(buffer + LWS_PRE, pss->ptr, n);
+                pss->ptr += n;
+                if (lws_write_http(wsi, buffer + LWS_PRE, (size_t) n) < n) {
+                    if (pss->buffer != (char *) index_html) free(pss->buffer);
+                    return -1;
+                }
+            } while (!lws_send_pipe_choked(wsi) && !done);
+
+            if (!done && pss->ptr < pss->buffer + pss->len) {
+                lws_callback_on_writable(wsi);
+                break;
             }
 
-            lws_callback_on_writable(wsi);
-            break;
+            if (pss->buffer != (char *) index_html) {
+                free(pss->buffer);
+            }
+            goto try_to_reuse;
+
+        case LWS_CALLBACK_HTTP_FILE_COMPLETION:
+            goto try_to_reuse;
 
         case LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION:
             if (!len || (SSL_get_verify_result((SSL *) in) != X509_V_OK)) {

@@ -37,8 +37,8 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -s, --signal <signal string>
       Signal to send to the command when exit it (default: 1, SIGHUP)
 
-  -r, --reconnect <seconds>
-      Time to reconnect for the client in seconds (default: 10)
+  -a, --url-arg
+      Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)
 
   -R, --readonly
       Do not allow clients to write to the TTY

@@ -9,7 +9,6 @@
 #include <sys/queue.h>
 #include <sys/select.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <pthread.h>
 
 #if defined(__OpenBSD__) || defined(__APPLE__)
@@ -29,7 +28,6 @@
 // initial message list
 char initial_cmds[] = {
         SET_WINDOW_TITLE,
-        SET_RECONNECT,
         SET_PREFERENCES
 };
 
@@ -45,9 +43,6 @@ send_initial_message(struct lws *wsi, int index) {
         case SET_WINDOW_TITLE:
             gethostname(buffer, sizeof(buffer) - 1);
             n = sprintf((char *) p, "%c%s (%s)", cmd, server->command, buffer);
-            break;
-        case SET_RECONNECT:
-            n = sprintf((char *) p, "%c%d", cmd, server->reconnect);
             break;
         case SET_PREFERENCES:
             n = sprintf((char *) p, "%c%s", cmd, server->prefs_json);
@@ -135,26 +130,34 @@ tty_client_destroy(struct tty_client *client) {
 
     client->running = false;
 
-    pthread_mutex_lock(&client->mutex);
-    client->state = STATE_DONE;
-    pthread_cond_signal(&client->cond);
-    pthread_mutex_unlock(&client->mutex);
-
-    // kill process and free resource
-    lwsl_notice("sending %s (%d) to process %d\n", server->sig_name, server->sig_code, client->pid);
-    if (kill(client->pid, server->sig_code) != 0) {
-        lwsl_err("kill: %d, errno: %d (%s)\n", client->pid, errno, strerror(errno));
+    if (pthread_mutex_trylock(&client->mutex)) {
+        client->state = STATE_DONE;
+        pthread_cond_signal(&client->cond);
+        pthread_mutex_unlock(&client->mutex);
     }
-    int status;
-    while (waitpid(client->pid, &status, 0) == -1 && errno == EINTR)
-        ;
-    lwsl_notice("process exited with code %d, pid: %d\n", status, client->pid);
+
+    // kill process (group) and free resource
+    int pgid = getpgid(client->pid);
+    int pid = pgid > 0 ? -pgid : client->pid;
+    lwsl_notice("sending %s (%d) to process (group) %d\n", server->sig_name, server->sig_code, pid);
+    if (kill(pid, server->sig_code) != 0) {
+        lwsl_err("kill: %d, errno: %d (%s)\n", pid, errno, strerror(errno));
+    }
+    pid_t pid_out;
+    int status = wait_proc(client->pid, &pid_out);
+    if (pid_out > 0) {
+        lwsl_notice("process exited with code %d, pid: %d\n", status, pid_out);
+    }
     close(client->pty);
 
 cleanup:
     // free the buffer
     if (client->buffer != NULL)
         free(client->buffer);
+
+    for (int i = 0; i < client->argc; i++) {
+        free(client->args[i]);
+    }
 
     pthread_mutex_destroy(&client->mutex);
 
@@ -164,58 +167,65 @@ cleanup:
 
 void *
 thread_run_command(void *args) {
-    struct tty_client *client;
+    struct tty_client *client = (struct tty_client *) args;
+
+    // append url args to arguments
+    char *argv[server->argc + client->argc + 1];
+    int i, n = 0;
+    for (i = 0; i < server->argc; i++) {
+        argv[n++] = server->argv[i];
+    }
+    for (i = 0; i < client->argc; i++) {
+        argv[n++] = client->args[i];
+    }
+    argv[n] = NULL;
+
     int pty;
     fd_set des_set;
-
-    client = (struct tty_client *) args;
     pid_t pid = forkpty(&pty, NULL, NULL, NULL);
+    if (pid < 0) { /* error */
+        lwsl_err("forkpty failed: %d (%s)\n", errno, strerror(errno));
+        pthread_exit((void *) 1);
+    } else if (pid == 0) { /* child */
+        setenv("TERM", server->terminal_type, true);
+        // Don't pass the web socket onto child processes
+        close(lws_get_socket_fd(client->wsi));
+        if (execvp(argv[0], argv) < 0) {
+            perror("execvp failed\n");
+            _exit(-errno);
+        }
+    }
 
-    switch (pid) {
-        case -1: /* error */
-            lwsl_err("forkpty, error: %d (%s)\n", errno, strerror(errno));
-            break;
-        case 0: /* child */
-            if (setenv("TERM", server->terminal_type, true) < 0) {
-                perror("setenv");
-                pthread_exit((void *) 1);
-            }
-            if (execvp(server->argv[0], server->argv) < 0) {
-                perror("execvp");
-                pthread_exit((void *) 1);
-            }
-            break;
-        default: /* parent */
-            lwsl_notice("started process, pid: %d\n", pid);
-            client->pid = pid;
-            client->pty = pty;
-            client->running = true;
-            if (client->size.ws_row > 0 && client->size.ws_col > 0)
-                ioctl(client->pty, TIOCSWINSZ, &client->size);
+    lwsl_notice("started process, pid: %d\n", pid);
+    client->pid = pid;
+    client->pty = pty;
+    client->running = true;
+    if (client->size.ws_row > 0 && client->size.ws_col > 0)
+        ioctl(client->pty, TIOCSWINSZ, &client->size);
 
+    while (client->running) {
+        FD_ZERO (&des_set);
+        FD_SET (pty, &des_set);
+        struct timeval tv = { 1, 0 };
+        int ret = select(pty + 1, &des_set, NULL, NULL, &tv);
+        if (ret == 0) continue;
+        if (ret < 0) break;
+
+        if (FD_ISSET (pty, &des_set)) {
             while (client->running) {
-                FD_ZERO (&des_set);
-                FD_SET (pty, &des_set);
-                struct timeval tv = { 1, 0 };
-                int ret = select(pty + 1, &des_set, NULL, NULL, &tv);
-                if (ret == 0) continue;
-                if (ret < 0) break;
-
-                if (FD_ISSET (pty, &des_set)) {
-                    while (client->running) {
-                        pthread_mutex_lock(&client->mutex);
-                        while (client->state == STATE_READY) {
-                            pthread_cond_wait(&client->cond, &client->mutex);
-                        }
-                        memset(client->pty_buffer, 0, sizeof(client->pty_buffer));
-                        client->pty_len = read(pty, client->pty_buffer + LWS_PRE + 1, BUF_SIZE);
-                        client->state = STATE_READY;
-                        pthread_mutex_unlock(&client->mutex);
-                        break;
-                    }
+                pthread_mutex_lock(&client->mutex);
+                while (client->state == STATE_READY) {
+                    pthread_cond_wait(&client->cond, &client->mutex);
                 }
+                memset(client->pty_buffer, 0, sizeof(client->pty_buffer));
+                client->pty_len = read(pty, client->pty_buffer + LWS_PRE + 1, BUF_SIZE);
+                client->state = STATE_READY;
+                pthread_mutex_unlock(&client->mutex);
+                break;
             }
-            break;
+        }
+
+        if (client->pty_len <= 0) break;
     }
 
     pthread_exit((void *) 0);
@@ -258,6 +268,18 @@ callback_tty(struct lws *wsi, enum lws_callback_reasons reason,
             client->buffer = NULL;
             client->state = STATE_INIT;
             client->pty_len = 0;
+            client->argc = 0;
+
+            if (server->url_arg) {
+                while (lws_hdr_copy_fragment(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_URI_ARGS, n++) > 0) {
+                    if (strncmp(buf, "arg=", 4) == 0) {
+                        client->args = xrealloc(client->args, (client->argc + 1) * sizeof(char *));
+                        client->args[client->argc] = strdup(&buf[4]);
+                        client->argc++;
+                    }
+                }
+            }
+
             pthread_mutex_init(&client->mutex, NULL);
             pthread_cond_init(&client->cond, NULL);
             lws_get_peer_addresses(wsi, lws_get_socket_fd(wsi),
@@ -268,8 +290,8 @@ callback_tty(struct lws *wsi, enum lws_callback_reasons reason,
             LIST_INSERT_HEAD(&server->clients, client, list);
             server->client_count++;
             pthread_mutex_unlock(&server->mutex);
-            lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_GET_URI);
 
+            lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_GET_URI);
             lwsl_notice("WS   %s - %s (%s), clients: %d\n", buf, client->address, client->hostname, server->client_count);
             break;
 
@@ -280,22 +302,24 @@ callback_tty(struct lws *wsi, enum lws_callback_reasons reason,
                     break;
                 }
                 if (send_initial_message(wsi, client->initial_cmd_index) < 0) {
+                    lwsl_err("failed to send initial message, index: %d\n", client->initial_cmd_index);
                     lws_close_reason(wsi, LWS_CLOSE_STATUS_UNEXPECTED_CONDITION, NULL, 0);
                     return -1;
                 }
                 client->initial_cmd_index++;
                 lws_callback_on_writable(wsi);
-                return 0;
+                break;
             }
             if (client->state != STATE_READY)
                 break;
 
             // read error or client exited, close connection
-            if (client->pty_len <= 0) {
-                lws_close_reason(wsi,
-                                 client->pty_len == 0 ? LWS_CLOSE_STATUS_NORMAL
-                                                       : LWS_CLOSE_STATUS_UNEXPECTED_CONDITION,
-                                 NULL, 0);
+            if (client->pty_len == 0) {
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL, NULL, 0);
+                return 1;
+            } else if (client->pty_len < 0) {
+                lwsl_err("read error: %d (%s)\n", errno, strerror(errno));
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_UNEXPECTED_CONDITION, NULL, 0);
                 return -1;
             }
 

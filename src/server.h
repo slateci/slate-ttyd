@@ -11,7 +11,6 @@
 #define OUTPUT '0'
 #define SET_WINDOW_TITLE '1'
 #define SET_PREFERENCES '2'
-#define SET_RECONNECT '3'
 
 // websocket url path
 #define WS_PATH "/ws"
@@ -33,6 +32,8 @@ struct tty_client {
     bool authenticated;
     char hostname[100];
     char address[50];
+    char **args;
+    int argc;
 
     struct lws *wsi;
     struct winsize size;
@@ -63,12 +64,13 @@ struct tty_server {
     int client_count;                         // client count
     char *prefs_json;                         // client preferences
     char *credential;                         // encoded basic auth credential
-    int reconnect;                            // reconnect timeout
     char *index;                              // custom index.html
     char *command;                            // full command line
     char **argv;                              // command with arguments
+    int argc;                                 // command + arguments count
     int sig_code;                             // close signal
     char sig_name[20];                        // human readable signal string
+    bool url_arg;                             // allow client to send cli arguments in URL
     bool readonly;                            // whether not allow clients to write to the TTY
     bool check_origin;                        // whether allow websocket connection from different origin
     int max_clients;                          // maximum clients to support
