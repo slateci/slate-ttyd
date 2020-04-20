@@ -1,5 +1,6 @@
 import { bind } from 'decko';
-import { Component, h } from 'preact';
+import { h, Component } from 'preact';
+import { saveAs } from 'file-saver';
 import { IDisposable, ITerminalAddon, Terminal } from 'xterm';
 import * as Zmodem from 'zmodem.js/src/zmodem_browser';
 
@@ -17,17 +18,12 @@ export class ZmodemAddon extends Component<Props, State> implements ITerminalAdd
     private terminal: Terminal | undefined;
     private keyDispose: IDisposable | undefined;
     private sentry: Zmodem.Sentry;
-    private session: Zmodem.Session | undefined;
+    private session: Zmodem.Session;
 
-    constructor(props) {
+    constructor(props: Props) {
         super(props);
 
-        this.sentry = new Zmodem.Sentry({
-            to_terminal: (octets: ArrayBuffer) => this.zmodemWrite(octets),
-            sender: (octets: ArrayLike<number>) => this.zmodemSend(octets),
-            on_retract: () => this.zmodemReset(),
-            on_detect: (detection: Zmodem.Detection) => this.zmodemDetect(detection),
-        });
+        this.zmodemInit();
     }
 
     render(_, { modal }: State) {
@@ -63,6 +59,17 @@ export class ZmodemAddon extends Component<Props, State> implements ITerminalAdd
     }
 
     @bind
+    private zmodemInit() {
+        this.session = null;
+        this.sentry = new Zmodem.Sentry({
+            to_terminal: (octets: ArrayBuffer) => this.zmodemWrite(octets),
+            sender: (octets: ArrayLike<number>) => this.zmodemSend(octets),
+            on_retract: () => this.zmodemReset(),
+            on_detect: (detection: Zmodem.Detection) => this.zmodemDetect(detection),
+        });
+    }
+
+    @bind
     private zmodemReset() {
         this.terminal.setOption('disableStdin', false);
 
@@ -70,11 +77,14 @@ export class ZmodemAddon extends Component<Props, State> implements ITerminalAdd
             this.keyDispose.dispose();
             this.keyDispose = null;
         }
+        this.zmodemInit();
+
+        this.terminal.focus();
     }
 
     @bind
     private zmodemWrite(data: ArrayBuffer): void {
-        this.terminal.writeUtf8(new Uint8Array(data));
+        this.terminal.write(new Uint8Array(data));
     }
 
     @bind
@@ -130,7 +140,10 @@ export class ZmodemAddon extends Component<Props, State> implements ITerminalAdd
             });
             offer
                 .accept()
-                .then(() => Zmodem.Browser.save_to_disk(fileBuffer, offer.get_details().name))
+                .then(() => {
+                    const blob = new Blob(fileBuffer, { type: 'application/octet-stream' });
+                    saveAs(blob, offer.get_details().name);
+                })
                 .catch(e => handleError(e, 'receive'));
         });
 

@@ -63,7 +63,6 @@ const baseConfig = {
     performance : {
         hints : false
     },
-    devtool: 'source-map',
 };
 
 const devConfig =  {
@@ -73,11 +72,12 @@ const devConfig =  {
         compress: true,
         port: 9000,
         proxy: [{
-            context: ['/auth_token.js', '/ws'],
+            context: ['/token', '/ws'],
             target: 'http://localhost:7681',
             ws: true
         }]
-    }
+    },
+    devtool: 'inline-source-map',
 };
 
 const prodConfig = {
@@ -96,7 +96,8 @@ const prodConfig = {
                 }
             }),
         ]
-    }
+    },
+    devtool: 'source-map',
 };
 
 

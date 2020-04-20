@@ -3,18 +3,23 @@ import * as backoff from 'backoff';
 import { Component, h } from 'preact';
 import { ITerminalOptions, Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
+import { WebglAddon } from 'xterm-addon-webgl';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 
 import { OverlayAddon } from './overlay';
 import { ZmodemAddon } from '../zmodem';
 
-import 'xterm/dist/xterm.css';
+import 'xterm/css/xterm.css';
 
-export interface WindowExtended extends Window {
-    term: Terminal;
-    tty_auth_token?: string;
+interface TtydTerminal extends Terminal {
+    fit(): void;
 }
-declare let window: WindowExtended;
+
+declare global {
+    interface Window {
+        term: TtydTerminal;
+    }
+}
 
 const enum Command {
     // server side
@@ -29,7 +34,8 @@ const enum Command {
 
 interface Props {
     id: string;
-    url: string;
+    wsUrl: string;
+    tokenUrl: string;
     options: ITerminalOptions;
 }
 
@@ -42,12 +48,14 @@ export class Xterm extends Component<Props> {
     private overlayAddon: OverlayAddon;
     private zmodemAddon: ZmodemAddon;
     private socket: WebSocket;
+    private token: string;
     private title: string;
     private resizeTimeout: number;
     private backoff: backoff.Backoff;
     private backoffLock = false;
+    private reconnect = false;
 
-    constructor(props) {
+    constructor(props: Props) {
         super(props);
 
         this.textEncoder = new TextEncoder();
@@ -58,18 +66,27 @@ export class Xterm extends Component<Props> {
             initialDelay: 100,
             maxDelay: 10000,
         });
+        this.backoff.failAfter(15);
         this.backoff.on('ready', () => {
             this.backoffLock = false;
-            this.openTerminal();
+            this.refreshToken().then(this.connect);
         });
         this.backoff.on('backoff', (_, delay: number) => {
             console.log(`[ttyd] will attempt to reconnect websocket in ${delay}ms`);
             this.backoffLock = true;
         });
+        this.backoff.on('fail', () => {
+            this.backoffLock = true; // break backoff
+        });
     }
 
-    componentDidMount() {
+    async componentDidMount() {
+        await this.refreshToken();
         this.openTerminal();
+        this.connect();
+
+        window.addEventListener('resize', this.onWindowResize);
+        window.addEventListener('beforeunload', this.onWindowUnload);
     }
 
     componentWillUnmount() {
@@ -98,34 +115,44 @@ export class Xterm extends Component<Props> {
     }
 
     @bind
+    private async refreshToken() {
+        try {
+            const resp = await fetch(this.props.tokenUrl);
+            if (resp.ok) {
+                const json = await resp.json();
+                this.token = json.token;
+            }
+        } catch (e) {
+            console.error(`[ttyd] fetch ${this.props.tokenUrl}: `, e);
+        }
+    }
+
+    @bind
     private onWindowResize() {
         const { fitAddon } = this;
         clearTimeout(this.resizeTimeout);
         this.resizeTimeout = setTimeout(() => fitAddon.fit(), 250) as any;
     }
 
-    private onWindowUnload(event: BeforeUnloadEvent): string {
-        const message = 'Close terminal? this will also terminate the command.';
-        event.returnValue = message;
-        return message;
+    @bind
+    private onWindowUnload(event: BeforeUnloadEvent): any {
+        const { socket } = this;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            const message = 'Close terminal? this will also terminate the command.';
+            event.returnValue = message;
+            return message;
+        }
+        event.preventDefault();
     }
 
     @bind
     private openTerminal() {
-        if (this.terminal) {
-            this.terminal.dispose();
-        }
-
-        this.socket = new WebSocket(this.props.url, ['tty']);
         this.terminal = new Terminal(this.props.options);
-        const { socket, terminal, container, fitAddon, overlayAddon } = this;
-        window.term = terminal;
-
-        socket.binaryType = 'arraybuffer';
-        socket.onopen = this.onSocketOpen;
-        socket.onmessage = this.onSocketData;
-        socket.onclose = this.onSocketClose;
-        socket.onerror = this.onSocketError;
+        const { terminal, container, fitAddon, overlayAddon } = this;
+        window.term = terminal as TtydTerminal;
+        window.term.fit = () => {
+            this.fitAddon.fit();
+        };
 
         terminal.loadAddon(fitAddon);
         terminal.loadAddon(overlayAddon);
@@ -147,53 +174,61 @@ export class Xterm extends Component<Props> {
             });
         }
         terminal.open(container);
-        terminal.focus();
-
-        window.addEventListener('resize', this.onWindowResize);
-        window.addEventListener('beforeunload', this.onWindowUnload);
     }
 
     @bind
-    private reconnect() {
-        if (!this.backoffLock) {
-            this.backoff.backoff();
-        }
+    private connect() {
+        this.socket = new WebSocket(this.props.wsUrl, ['tty']);
+        const { socket } = this;
+
+        socket.binaryType = 'arraybuffer';
+        socket.onopen = this.onSocketOpen;
+        socket.onmessage = this.onSocketData;
+        socket.onclose = this.onSocketClose;
+        socket.onerror = this.onSocketError;
     }
 
     @bind
     private onSocketOpen() {
-        console.log('[ttyd] Websocket connection opened');
+        console.log('[ttyd] websocket connection opened');
         this.backoff.reset();
 
-        const { socket, textEncoder, fitAddon } = this;
-        const authToken = window.tty_auth_token;
+        const { socket, textEncoder, terminal, fitAddon } = this;
+        socket.send(textEncoder.encode(JSON.stringify({ AuthToken: this.token })));
 
-        socket.send(textEncoder.encode(JSON.stringify({ AuthToken: authToken })));
-        fitAddon.fit();
+        if (this.reconnect) {
+            const dims = fitAddon.proposeDimensions();
+            terminal.reset();
+            terminal.resize(dims.cols, dims.rows);
+            this.onTerminalResize(dims); // may not be triggered by terminal.resize
+        } else {
+            this.reconnect = true;
+            fitAddon.fit();
+        }
+
+        terminal.focus();
     }
 
     @bind
     private onSocketClose(event: CloseEvent) {
         console.log(`[ttyd] websocket connection closed with code: ${event.code}`);
 
-        const { overlayAddon } = this;
+        const { backoff, backoffLock, overlayAddon } = this;
         overlayAddon.showOverlay('Connection Closed', null);
-        window.removeEventListener('beforeunload', this.onWindowUnload);
-
-        // 1008: POLICY_VIOLATION - Auth failure
-        if (event.code === 1008) {
-            window.location.reload();
-        }
 
         // 1000: CLOSE_NORMAL
-        if (event.code !== 1000) {
-            this.reconnect();
+        if (event.code !== 1000 && !backoffLock) {
+            backoff.backoff();
         }
     }
 
     @bind
-    private onSocketError() {
-        this.reconnect();
+    private onSocketError(event: Event) {
+        console.error('[ttyd] websocket connection error: ', event);
+        const { backoff, backoffLock } = this;
+        if (!backoffLock) {
+            backoff.backoff();
+        }
     }
 
     @bind
@@ -214,8 +249,13 @@ export class Xterm extends Component<Props> {
             case Command.SET_PREFERENCES:
                 const preferences = JSON.parse(textDecoder.decode(data));
                 Object.keys(preferences).forEach(key => {
-                    console.log(`[ttyd] setting ${key}: ${preferences[key]}`);
-                    terminal.setOption(key, preferences[key]);
+                    if (key === 'rendererType' && preferences[key] === 'webgl') {
+                        terminal.loadAddon(new WebglAddon());
+                        console.log(`[ttyd] WebGL renderer enabled`);
+                    } else {
+                        console.log(`[ttyd] option: ${key}=${preferences[key]}`);
+                        terminal.setOption(key, preferences[key]);
+                    }
                 });
                 break;
             default:
