@@ -42,19 +42,22 @@ int encode_auth(const char* credential){
 }
 
 static int check_auth(struct lws *wsi, struct pss_http *pss) {
-    if (server->credential == NULL) return AUTH_OK;
+    if (server->credential == NULL) {
+        lwsl_notice("server credential is unset, treating request as authorized\n");
+        return AUTH_OK;
+    }
 
 	char buf[LWS_PRE + 256];
 	const char* value = lws_get_urlarg_by_name(wsi, "auth", buf, sizeof(buf));
 	if (!value){
-		printf("parameter missing\n");
+		lwsl_notice("query parameter missing, rejecting request\n");
 		return AUTH_FAIL;
 	}
 	if(*value=='=')
 		value++;
-	printf("Got parameter: %s\n",value);
+	lwsl_notice("Offered credential parameter: %s\n",value);
 	if (strcmp(value,server->credential)){
-		printf("token does not match\n");
+		lwsl_notice("token does not match, rejecting request\n");
 		
 		unsigned char buffer[1024 + LWS_PRE], *p, *end;
 		p = buffer + LWS_PRE;
@@ -75,7 +78,7 @@ static int check_auth(struct lws *wsi, struct pss_http *pss) {
 		
 		return AUTH_FAIL;
 	}
-	printf("token matches\n");
+	lwsl_notice("Offered credential matches\n");
 	return AUTH_OK;
 }
 
@@ -204,15 +207,16 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                                          (const unsigned char *)content_type, 9, &p, end))
           return 1;
 #ifdef LWS_WITH_HTTP_STREAM_COMPRESSION
-        if (!uncompress_html(&output, &output_len)) return 1;
+        //hack: our data is already uncompressed
+        //if (!uncompress_html(&output, &output_len)) return 1;
 #else
-        if (accept_gzip(wsi)) {
-          if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
-                                           (unsigned char *)"gzip", 4, &p, end))
-            return 1;
-        } else {
-          if (!uncompress_html(&output, &output_len)) return 1;
-        }
+        //if (accept_gzip(wsi)) {
+        //  if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
+        //                                   (unsigned char *)"gzip", 4, &p, end))
+        //    return 1;
+        //} else {
+        //  if (!uncompress_html(&output, &output_len)) return 1;
+        //}
 #endif
 
         if (lws_add_http_header_content_length(wsi, (unsigned long)output_len, &p, end) ||
