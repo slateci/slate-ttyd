@@ -16,10 +16,10 @@ int encode_auth(const char* credential){
 	const static char marker[]="TTY_AUTH_TOKEN";
 	char* insert_ptr = strstr((char*)index_html, marker);
 	if (!insert_ptr) { //if unable to find an insert point, nothing to do
-		printf("Did not find credential insertion point\n");
+		lwsl_err("Did not find credential insertion point\n");
 		return 0;
 	}
-	printf("Found insertion point\n");
+	lwsl_notice("Found credential insertion point\n");
 	size_t len_written=0;
 	if (credential) {
 		size_t len = strlen(credential);
