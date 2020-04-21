@@ -44,7 +44,7 @@ task('default', () => {
             fileSize = file.contents.length;
             return cb(null, file);
         }))
-        .pipe(gzip())
+        //.pipe(gzip())
         .pipe(through.obj((file, enc, cb) => {
             const buf = file.contents;
             file.contents = Buffer.from(genHeader(fileSize, buf, buf.length));
