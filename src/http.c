@@ -210,15 +210,15 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                                          (const unsigned char *)content_type, 9, &p, end))
           return 1;
 #ifdef LWS_WITH_HTTP_STREAM_COMPRESSION
-        if (!uncompress_html(&output, &output_len)) return 1;
+        //if (!uncompress_html(&output, &output_len)) return 1;
 #else
-        if (accept_gzip(wsi)) {
-          if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
-                                           (unsigned char *)"gzip", 4, &p, end))
-            return 1;
-        } else {
-          if (!uncompress_html(&output, &output_len)) return 1;
-        }
+        //if (accept_gzip(wsi)) {
+        //  if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
+        //                                   (unsigned char *)"gzip", 4, &p, end))
+        //    return 1;
+        //} else {
+        //  if (!uncompress_html(&output, &output_len)) return 1;
+        //}
 #endif
 
         if (lws_add_http_header_content_length(wsi, (unsigned long)output_len, &p, end) ||
