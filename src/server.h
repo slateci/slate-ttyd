@@ -1,17 +1,21 @@
 #include <stdbool.h>
 #include <uv.h>
 
-#include "queue.h"
+#include "pty.h"
 
 // client message
 #define INPUT '0'
 #define RESIZE_TERMINAL '1'
+#define PAUSE '2'
+#define RESUME '3'
 #define JSON_DATA '{'
 
 // server message
 #define OUTPUT '0'
 #define SET_WINDOW_TITLE '1'
 #define SET_PREFERENCES '2'
+
+#define MAX_READ_RETRY 2
 
 // url paths
 struct endpoints {
@@ -26,8 +30,6 @@ extern struct lws_context *context;
 extern struct server *server;
 extern struct endpoints endpoints;
 
-typedef enum { STATE_INIT, STATE_KILL, STATE_EXIT } proc_state;
-
 struct pss_http {
   char path[128];
   char *buffer;
@@ -35,34 +37,23 @@ struct pss_http {
   size_t len;
 };
 
-struct pty_proc {
-  char **args;
-  int argc;
-
-  pid_t pid;
-  int status;
-  proc_state state;
-
-  int pty;
-  char *pty_buffer;
-  ssize_t pty_len;
-
-  uv_pipe_t pipe;
-
-  LIST_ENTRY(pty_proc) entry;
-};
-
 struct pss_tty {
   bool initialized;
   int initial_cmd_index;
   bool authenticated;
   char address[50];
+  char path[128];
+  char **args;
+  int argc;
 
   struct lws *wsi;
   char *buffer;
   size_t len;
 
-  struct pty_proc *proc;
+  pty_process *process;
+  pty_buf_t *pty_buf;
+
+  int lws_close_status;
 };
 
 struct server {
@@ -84,7 +75,4 @@ struct server {
   char terminal_type[30];  // terminal type to report
 
   uv_loop_t *loop;      // the libuv event loop
-  uv_signal_t watcher;  // SIGCHLD watcher
-
-  LIST_HEAD(proc, pty_proc) procs;  // started process list
 };
