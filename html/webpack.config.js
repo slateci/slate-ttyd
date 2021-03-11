@@ -1,5 +1,5 @@
 const path = require('path');
-const merge = require('webpack-merge');
+const { merge } = require('webpack-merge');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
@@ -43,9 +43,11 @@ const baseConfig = {
         extensions: [ '.tsx', '.ts', '.js' ]
     },
     plugins: [
-        new CopyWebpackPlugin([
-            { from: './favicon.png', to: '.' }
-        ], {}),
+        new CopyWebpackPlugin({
+            patterns:[
+                { from: './favicon.png', to: '.' }
+            ],
+        }),
         new MiniCssExtractPlugin({
             filename: devMode ? '[name].css' : '[name].[hash].css',
             chunkFilename: devMode ? '[id].css' : '[id].[hash].css',

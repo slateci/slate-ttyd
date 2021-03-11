@@ -17,9 +17,6 @@
 #define TTYD_VERSION "unknown"
 #endif
 
-int
-encode_auth(const char* credential);
-
 volatile bool force_exit = false;
 struct lws_context *context;
 struct server *server;
@@ -45,6 +42,18 @@ static const struct lws_extension extensions[] = {
     {NULL, NULL, NULL}};
 #endif
 
+#if LWS_LIBRARY_VERSION_NUMBER >= 4000000
+static const uint32_t backoff_ms[] = { 1000, 2000, 3000, 4000, 5000 };
+static lws_retry_bo_t retry = {
+      .retry_ms_table = backoff_ms,
+      .retry_ms_table_count = LWS_ARRAY_SIZE(backoff_ms),
+      .conceal_count = LWS_ARRAY_SIZE(backoff_ms),
+      .secs_since_valid_ping = 300,
+      .secs_since_valid_hangup = 300 + 7,
+      .jitter_percent = 0,
+    };
+#endif
+
 // command line options
 static const struct option options[] = {
     {"port", required_argument, NULL, 'p'},
@@ -55,6 +64,9 @@ static const struct option options[] = {
     {"signal", required_argument, NULL, 's'},
     {"index", required_argument, NULL, 'I'},
     {"base-path", required_argument, NULL, 'b'},
+#if LWS_LIBRARY_VERSION_NUMBER >= 4000000
+    {"ping-interval", required_argument, NULL, 'P'},
+#endif
     {"ipv6", no_argument, NULL, '6'},
     {"ssl", no_argument, NULL, 'S'},
     {"ssl-cert", required_argument, NULL, 'C'},
@@ -72,7 +84,13 @@ static const struct option options[] = {
     {"version", no_argument, NULL, 'v'},
     {"help", no_argument, NULL, 'h'},
     {NULL, 0, 0, 0}};
+
+#if LWS_LIBRARY_VERSION_NUMBER < 4000000
 static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh";
+#endif
+#if LWS_LIBRARY_VERSION_NUMBER >= 4000000
+static const char *opt_string = "p:i:c:u:g:s:I:b:P:6aSC:K:A:Rt:T:Om:oBd:vh";
+#endif
 
 static void print_help() {
   // clang-format off
@@ -97,14 +115,19 @@ static void print_help() {
           "    -o, --once              Accept only one client and exit on disconnection\n"
           "    -B, --browser           Open terminal with the default system browser\n"
           "    -I, --index             Custom index.html path\n"
-          "    -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here)\n"
+          "    -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)\n"
+#if LWS_LIBRARY_VERSION_NUMBER >= 4000000
+          "    -P, --ping-interval     Websocket ping interval(sec) (default: 300)\n"
+#endif
 #ifdef LWS_WITH_IPV6
           "    -6, --ipv6              Enable IPv6 support\n"
 #endif
+#if defined(LWS_OPENSSL_SUPPORT) || defined(LWS_WITH_TLS)
           "    -S, --ssl               Enable SSL\n"
           "    -C, --ssl-cert          SSL certificate file path\n"
           "    -K, --ssl-key           SSL key file path\n"
           "    -A, --ssl-ca            SSL CA file path for client certificate verification\n"
+#endif
           "    -d, --debug             Set log level (default: 7)\n"
           "    -v, --version           Print the version and exit\n"
           "    -h, --help              Print this text and exit\n\n"
@@ -121,7 +144,6 @@ static struct server *server_new(int argc, char **argv, int start) {
   ts = xmalloc(sizeof(struct server));
 
   memset(ts, 0, sizeof(struct server));
-  LIST_INIT(&ts->procs);
   ts->client_count = 0;
   ts->sig_code = SIGHUP;
   sprintf(ts->terminal_type, "%s", "xterm-256color");
@@ -144,7 +166,8 @@ static struct server *server_new(int argc, char **argv, int start) {
   ts->command = xmalloc(cmd_len + 1);
   char *ptr = ts->command;
   for (int i = 0; i < cmd_argc; i++) {
-    ptr = stpcpy(ptr, ts->argv[i]);
+    size_t len = strlen(ts->argv[i]);
+    ptr = memcpy (ptr, ts->argv[i], len + 1) + len;
     if (i != cmd_argc - 1) {
       *ptr++ = ' ';
     }
@@ -153,8 +176,6 @@ static struct server *server_new(int argc, char **argv, int start) {
 
   ts->loop = xmalloc(sizeof *ts->loop);
   uv_loop_init(ts->loop);
-  uv_signal_init(ts->loop, &ts->watcher);
-  ts->watcher.data = &ts->procs;
 
   return ts;
 }
@@ -176,7 +197,6 @@ static void server_free(struct server *ts) {
       unlink(ts->socket_path);
     }
   }
-  uv_signal_stop(&ts->watcher);
   uv_loop_close(ts->loop);
   free(ts->loop);
   free(ts);
@@ -251,6 +271,12 @@ int main(int argc, char **argv) {
     print_help();
     return 0;
   }
+#ifdef _WIN32
+  if (!conpty_init()) {
+    fprintf(stderr, "ERROR: ConPTY init failed! Make sure you are on Windows 10 1809 or later.");
+    return 1;
+  }
+#endif
 
   int start = calc_command_start(argc, argv);
   server = server_new(argc, argv, start);
@@ -260,8 +286,6 @@ int main(int argc, char **argv) {
   info.port = 7681;
   info.iface = NULL;
   info.protocols = protocols;
-  info.ssl_cert_filepath = NULL;
-  info.ssl_private_key_filepath = NULL;
   info.gid = -1;
   info.uid = -1;
   info.max_http_header_pool = 16;
@@ -325,8 +349,13 @@ int main(int argc, char **argv) {
         iface[sizeof(iface) - 1] = '\0';
         break;
       case 'c':
-        server->credential = (char*)malloc(strlen(optarg)+1);
-        strncpy(server->credential,optarg,strlen(optarg));
+        if (strchr(optarg, ':') == NULL) {
+          fprintf(stderr,
+                  "ttyd: invalid credential, format: username:password\n");
+          return -1;
+        }
+        server->credential =
+            base64_encode((const unsigned char *)optarg, strlen(optarg));
         break;
       case 'u':
         info.uid = atoi(optarg);
@@ -376,9 +405,21 @@ int main(int argc, char **argv) {
         sc(ws) sc(index) sc(token) sc(parent)
 #undef sc
       } break;
+#if LWS_LIBRARY_VERSION_NUMBER >= 4000000
+      case 'P':
+        if (atoi(optarg) <= 0) {
+          fprintf(stderr, "ttyd: invalid ping interval: %s\n", optarg);
+          return -1;
+        }
+        retry.secs_since_valid_ping = atoi(optarg);
+        retry.secs_since_valid_hangup = atoi(optarg) + 7;
+        info.retry_and_idle_policy = &retry;
+        break;
+#endif
       case '6':
         info.options &= ~(LWS_SERVER_OPTION_DISABLE_IPV6);
         break;
+#if defined(LWS_OPENSSL_SUPPORT) || defined(LWS_WITH_TLS)
       case 'S':
         ssl = true;
         break;
@@ -394,6 +435,7 @@ int main(int argc, char **argv) {
         strncpy(ca_path, optarg, sizeof(ca_path) - 1);
         ca_path[sizeof(ca_path) - 1] = '\0';
         break;
+#endif
       case 'T':
         strncpy(server->terminal_type, optarg,
                 sizeof(server->terminal_type) - 1);
@@ -404,7 +446,7 @@ int main(int argc, char **argv) {
       case 't':
         optind--;
         for (; optind < start && *argv[optind] != '-'; optind++) {
-          char *option = strdup(optarg);
+          char *option = optarg;
           char *key = strsep(&option, "=");
           if (key == NULL) {
             fprintf(stderr,
@@ -419,7 +461,6 @@ int main(int argc, char **argv) {
                     optarg);
             return -1;
           }
-          free(option);
           struct json_object *obj = json_tokener_parse(value);
           json_object_object_add(
               client_prefs, key,
@@ -447,7 +488,7 @@ int main(int argc, char **argv) {
           LWS_LIBRARY_VERSION);
   info.server_string = server_hdr;
 #endif
-#if LWS_LIBRARY_VERSION_NUMBER >= 2001000
+#if LWS_LIBRARY_VERSION_NUMBER >= 2001000 && LWS_LIBRARY_VERSION_NUMBER < 4000000
   info.ws_ping_pong_interval = 5;
 #endif
 
@@ -456,6 +497,7 @@ int main(int argc, char **argv) {
     if (endswith(info.iface, ".sock") || endswith(info.iface, ".socket")) {
 #if defined(LWS_USE_UNIX_SOCK) || defined(LWS_WITH_UNIX_SOCK)
       info.options |= LWS_SERVER_OPTION_UNIX_SOCK;
+      info.port = 0; // warmcat/libwebsockets#1985
       strncpy(server->socket_path, info.iface, sizeof(server->socket_path) - 1);
 #else
       fprintf(stderr,
@@ -465,16 +507,19 @@ int main(int argc, char **argv) {
     }
   }
 
+#if defined(LWS_OPENSSL_SUPPORT) || defined(LWS_WITH_TLS)
   if (ssl) {
     info.ssl_cert_filepath = cert_path;
     info.ssl_private_key_filepath = key_path;
-    info.ssl_ca_filepath = ca_path;
-    if (strlen(info.ssl_ca_filepath) > 0)
+    if (strlen(ca_path) > 0) {
+      info.ssl_ca_filepath = ca_path;
       info.options |= LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
+    }
 #if LWS_LIBRARY_VERSION_MAJOR >= 2
     info.options |= LWS_SERVER_OPTION_REDIRECT_HTTP_TO_HTTPS;
 #endif
   }
+#endif
 
   lwsl_notice("ttyd %s (libwebsockets %s)\n", TTYD_VERSION,
               LWS_LIBRARY_VERSION);
@@ -499,10 +544,6 @@ int main(int argc, char **argv) {
   if (server->once) lwsl_notice("  once: true\n");
   if (server->index != NULL) {
     lwsl_notice("  custom index.html: %s\n", server->index);
-  }
-  if (encode_auth(server->credential)) {
-    lwsl_err("Failed to encode credentials into index.html\n");
-    return 1;
   }
 
 #if LWS_LIBRARY_VERSION_MAJOR >= 3
