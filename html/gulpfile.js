@@ -50,7 +50,7 @@ task('default', series('inline', () => {
             fileSize = file.contents.length;
             return cb(null, file);
         }))
-        .pipe(gzip())
+        //.pipe(gzip())
         .pipe(through2.obj((file, enc, cb) => {
             const buf = file.contents;
             file.contents = Buffer.from(genHeader(fileSize, buf, buf.length));
