@@ -1,5 +1,4 @@
 #include <libwebsockets.h>
-#include <openssl/ssl.h>
 #include <string.h>
 #include <zlib.h>
 
@@ -7,79 +6,56 @@
 #include "server.h"
 #include "utils.h"
 
+#if LWS_LIBRARY_VERSION_MAJOR < 2
+#define HTTP_STATUS_FOUND 302
+#endif
+
 enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
 
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
 
-int encode_auth(const char* credential){
-	const static char marker[]="TTY_AUTH_TOKEN";
-	char* insert_ptr = strstr((char*)index_html, marker);
-	if (!insert_ptr) { //if unable to find an insert point, nothing to do
-		lwsl_err("Did not find credential insertion point\n");
-		return 0;
-	}
-	lwsl_notice("Found credential insertion point\n");
-	size_t len_written=0;
-	if (credential) {
-		size_t len = strlen(credential);
-		if (len>64u) //credential too long; would overflow
-			return 1;
-		*insert_ptr++='\'';
-		memcpy((void*)insert_ptr,(void*)credential,len);
-		insert_ptr+=len;
-		*insert_ptr++='\'';
-		len_written=len+2;
-	}
-	else {
-		len_written=6;
-		memcpy((void*)insert_ptr,(void*)"null",len_written);
-		insert_ptr+=len_written;
-	}
-	if (len_written<sizeof(marker))
-		memset(insert_ptr,0x20,sizeof(marker)-len_written);
-	return 0;
-}
-
 static int check_auth(struct lws *wsi, struct pss_http *pss) {
-    if (server->credential == NULL) {
-        lwsl_notice("server credential is unset, treating request as authorized\n");
-        return AUTH_OK;
-    }
+  if (server->credential == NULL) return AUTH_OK;
 
-	char buf[LWS_PRE + 256];
-	const char* value = lws_get_urlarg_by_name(wsi, "auth", buf, sizeof(buf));
-	if (!value){
-		lwsl_notice("query parameter missing, rejecting request\n");
-		return AUTH_FAIL;
-	}
-	if(*value=='=')
-		value++;
-	lwsl_notice("Offered credential parameter: %s\n",value);
-	if (strcmp(value,server->credential)){
-		lwsl_notice("token does not match, rejecting request\n");
-		
-		unsigned char buffer[1024 + LWS_PRE], *p, *end;
-		p = buffer + LWS_PRE;
-		end = p + sizeof(buffer) - LWS_PRE;
-		char *body = strdup("401 Unauthorized\n");
-		size_t n = strlen(body);
-		if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
-		    lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-			                             (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
-		    lws_add_http_header_content_length(wsi, n, &p, end) ||
-		    lws_finalize_http_header(wsi, &p, end) ||
-		    lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-			return AUTH_ERROR;
-		
-		pss->buffer = pss->ptr = body;
-		pss->len = n;
-		lws_callback_on_writable(wsi);
-		
-		return AUTH_FAIL;
-	}
-	lwsl_notice("Offered credential matches\n");
-	return AUTH_OK;
+  int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
+  char buf[hdr_length + 1];
+  int len = lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_AUTHORIZATION);
+  if (len > 0) {
+    // extract base64 text from authorization header
+    char *ptr = &buf[0];
+    char *token, *b64_text = NULL;
+    int i = 1;
+    while ((token = strsep(&ptr, " ")) != NULL) {
+      if (strlen(token) == 0) continue;
+      if (i++ == 2) {
+        b64_text = token;
+        break;
+      }
+    }
+    if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
+  }
+
+  unsigned char buffer[1024 + LWS_PRE], *p, *end;
+  p = buffer + LWS_PRE;
+  end = p + sizeof(buffer) - LWS_PRE;
+
+  char *body = strdup("401 Unauthorized\n");
+  size_t n = strlen(body);
+
+  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
+      lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
+                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
+      lws_add_http_header_content_length(wsi, n, &p, end) ||
+      lws_finalize_http_header(wsi, &p, end) ||
+      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+    return AUTH_ERROR;
+
+  pss->buffer = pss->ptr = body;
+  pss->len = n;
+  lws_callback_on_writable(wsi);
+
+  return AUTH_FAIL;
 }
 
 static bool accept_gzip(struct lws *wsi) {
@@ -207,16 +183,15 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                                          (const unsigned char *)content_type, 9, &p, end))
           return 1;
 #ifdef LWS_WITH_HTTP_STREAM_COMPRESSION
-        //hack: our data is already uncompressed
-        //if (!uncompress_html(&output, &output_len)) return 1;
+        if (!uncompress_html(&output, &output_len)) return 1;
 #else
-        //if (accept_gzip(wsi)) {
-        //  if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
-        //                                   (unsigned char *)"gzip", 4, &p, end))
-        //    return 1;
-        //} else {
-        //  if (!uncompress_html(&output, &output_len)) return 1;
-        //}
+        if (accept_gzip(wsi)) {
+          if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
+                                           (unsigned char *)"gzip", 4, &p, end))
+            return 1;
+        } else {
+          if (!uncompress_html(&output, &output_len)) return 1;
+        }
 #endif
 
         if (lws_add_http_header_content_length(wsi, (unsigned long)output_len, &p, end) ||
@@ -236,7 +211,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       break;
 
     case LWS_CALLBACK_HTTP_WRITEABLE:
-      if (!pss->buffer || pss->len <= 0) {
+      if (!pss->buffer || pss->len == 0) {
         goto try_to_reuse;
       }
 
@@ -271,7 +246,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 
     case LWS_CALLBACK_HTTP_FILE_COMPLETION:
       goto try_to_reuse;
-
+#if (defined(LWS_OPENSSL_SUPPORT) || defined(LWS_WITH_TLS)) && !defined(LWS_WITH_MBEDTLS)
     case LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION:
       if (!len || (SSL_get_verify_result((SSL *)in) != X509_V_OK)) {
         int err = X509_STORE_CTX_get_error((X509_STORE_CTX *)user);
@@ -281,6 +256,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         return 1;
       }
       break;
+#endif
     default:
       break;
   }
