@@ -17,6 +17,9 @@
 #define TTYD_VERSION "unknown"
 #endif
 
+int
+encode_auth(const char* credential);
+
 volatile bool force_exit = false;
 struct lws_context *context;
 struct server *server;
@@ -544,6 +547,10 @@ int main(int argc, char **argv) {
   if (server->once) lwsl_notice("  once: true\n");
   if (server->index != NULL) {
     lwsl_notice("  custom index.html: %s\n", server->index);
+  }
+  if (encode_auth(server->credential)) {
+    lwsl_err("Failed to encode credentials into index.html\n");
+    return 1;
   }
 
 #if LWS_LIBRARY_VERSION_MAJOR >= 3
