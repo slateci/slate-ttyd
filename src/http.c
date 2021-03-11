@@ -15,47 +15,74 @@ enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
 
+int encode_auth(const char* credential){
+	const static char marker[]="TTY_AUTH_TOKEN";
+	char* insert_ptr = strstr((char*)index_html, marker);
+	if (!insert_ptr) { //if unable to find an insert point, nothing to do
+		lwsl_err("Did not find credential insertion point\n");
+		return 0;
+	}
+	lwsl_notice("Found credential insertion point\n");
+	size_t len_written=0;
+	if (credential) {
+		size_t len = strlen(credential);
+		if (len>64u) //credential too long; would overflow
+			return 1;
+		*insert_ptr++='\'';
+		memcpy((void*)insert_ptr,(void*)credential,len);
+		insert_ptr+=len;
+		*insert_ptr++='\'';
+		len_written=len+2;
+	}
+	else {
+		len_written=6;
+		memcpy((void*)insert_ptr,(void*)"null",len_written);
+		insert_ptr+=len_written;
+	}
+	if (len_written<sizeof(marker))
+		memset(insert_ptr,0x20,sizeof(marker)-len_written);
+	return 0;
+}
+
 static int check_auth(struct lws *wsi, struct pss_http *pss) {
-  if (server->credential == NULL) return AUTH_OK;
-
-  int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
-  char buf[hdr_length + 1];
-  int len = lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_AUTHORIZATION);
-  if (len > 0) {
-    // extract base64 text from authorization header
-    char *ptr = &buf[0];
-    char *token, *b64_text = NULL;
-    int i = 1;
-    while ((token = strsep(&ptr, " ")) != NULL) {
-      if (strlen(token) == 0) continue;
-      if (i++ == 2) {
-        b64_text = token;
-        break;
-      }
+    if (server->credential == NULL) {
+        lwsl_notice("server credential is unset, treating request as authorized\n");
+        return AUTH_OK;
     }
-    if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
-  }
 
-  unsigned char buffer[1024 + LWS_PRE], *p, *end;
-  p = buffer + LWS_PRE;
-  end = p + sizeof(buffer) - LWS_PRE;
-
-  char *body = strdup("401 Unauthorized\n");
-  size_t n = strlen(body);
-
-  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
-      lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
-      lws_add_http_header_content_length(wsi, n, &p, end) ||
-      lws_finalize_http_header(wsi, &p, end) ||
-      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-    return AUTH_ERROR;
-
-  pss->buffer = pss->ptr = body;
-  pss->len = n;
-  lws_callback_on_writable(wsi);
-
-  return AUTH_FAIL;
+	char buf[LWS_PRE + 256];
+	const char* value = lws_get_urlarg_by_name(wsi, "auth", buf, sizeof(buf));
+	if (!value){
+		lwsl_notice("query parameter missing, rejecting request\n");
+		return AUTH_FAIL;
+	}
+	if(*value=='=')
+		value++;
+	lwsl_notice("Offered credential parameter: %s\n",value);
+	if (strcmp(value,server->credential)){
+		lwsl_notice("token does not match, rejecting request\n");
+		
+		unsigned char buffer[1024 + LWS_PRE], *p, *end;
+		p = buffer + LWS_PRE;
+		end = p + sizeof(buffer) - LWS_PRE;
+		char *body = strdup("401 Unauthorized\n");
+		size_t n = strlen(body);
+		if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
+		    lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
+			                             (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
+		    lws_add_http_header_content_length(wsi, n, &p, end) ||
+		    lws_finalize_http_header(wsi, &p, end) ||
+		    lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+			return AUTH_ERROR;
+		
+		pss->buffer = pss->ptr = body;
+		pss->len = n;
+		lws_callback_on_writable(wsi);
+		
+		return AUTH_FAIL;
+	}
+	lwsl_notice("Offered credential matches\n");
+	return AUTH_OK;
 }
 
 static bool accept_gzip(struct lws *wsi) {
