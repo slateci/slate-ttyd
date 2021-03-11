@@ -1,13 +1,12 @@
 cmake_minimum_required(VERSION 2.8)
 
-project(ttyd)
-set(PROJECT_VERSION "1.6.0")
+project(ttyd C)
+set(PROJECT_VERSION "1.6.3")
 
 find_package(Git)
 if(GIT_FOUND)
     execute_process(
-            COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMAND ${GIT_EXECUTABLE} --git-dir ${CMAKE_CURRENT_SOURCE_DIR}/.git rev-parse --short HEAD
             RESULT_VARIABLE GIT_RET
             OUTPUT_VARIABLE GIT_COMMIT
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -29,7 +28,7 @@ else()
     set(CMAKE_C_STANDARD 99)
 endif()
 
-set(SOURCE_FILES src/server.c src/http.c src/protocol.c src/terminal.c src/utils.c)
+set(SOURCE_FILES src/utils.c src/pty.c src/protocol.c src/http.c src/server.c)
 
 include(FindPackageHandleStandardArgs)
 
@@ -51,7 +50,6 @@ if(JSON-C_FOUND)
     SET(JSON-C_LIBRARIES "${JSON-C_LIBRARY}")
 endif()
 
-find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Libwebsockets 1.7.0 QUIET)
 
@@ -66,8 +64,18 @@ if(NOT Libwebsockets_FOUND) # for libwebsockets-dev on ubuntu 16.04
     endif()
 endif()
 
-set(INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR} ${ZLIB_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIRS} ${JSON-C_INCLUDE_DIRS} ${LIBUV_INCLUDE_DIRS})
-set(LINK_LIBS ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+set(INCLUDE_DIRS ${ZLIB_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIRS} ${JSON-C_INCLUDE_DIRS} ${LIBUV_INCLUDE_DIRS})
+set(LINK_LIBS ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+
+set (CMAKE_REQUIRED_INCLUDES ${INCLUDE_DIRS})
+include(CheckSymbolExists)
+check_symbol_exists(LWS_OPENSSL_SUPPORT "lws_config.h" LWS_OPENSSL_ENABLED)
+check_symbol_exists(LWS_WITH_MBEDTLS "lws_config.h" LWS_MBEDTLS_ENABLED)
+if(LWS_OPENSSL_ENABLED AND NOT LWS_MBEDTLS_ENABLED)
+    find_package(OpenSSL REQUIRED)
+    list(APPEND INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR})
+    list(APPEND LINK_LIBS ${OPENSSL_LIBRARIES})
+endif()
 
 if(WIN32)
     list(APPEND LINK_LIBS shell32)
