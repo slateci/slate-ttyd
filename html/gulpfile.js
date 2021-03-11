@@ -1,9 +1,9 @@
-const { src, dest, task } = require("gulp");
+const { src, dest, task, series } = require("gulp");
 const clean = require('gulp-clean');
 const gzip = require('gulp-gzip');
 const inlineSource = require('gulp-inline-source');
 const rename = require("gulp-rename");
-const through = require('through2');
+const through2 = require('through2');
 
 const genHeader = (size, buf, len) => {
     let idx = 0;
@@ -33,23 +33,29 @@ const genHeader = (size, buf, len) => {
 let fileSize = 0;
 
 task('clean', () => {
-    return src('dist', {read: false, allowEmpty: true})
+    return src('dist', { read: false, allowEmpty: true })
         .pipe(clean());
 });
 
-task('default', () => {
+task('inline', () => {
     return src('dist/index.html')
         .pipe(inlineSource())
-        .pipe(through.obj((file, enc, cb) => {
+        .pipe(rename("inline.html"))
+        .pipe(dest('dist/'));
+});
+
+task('default', series('inline', () => {
+    return src('dist/inline.html')
+        .pipe(through2.obj((file, enc, cb) => {
             fileSize = file.contents.length;
             return cb(null, file);
         }))
-        //.pipe(gzip())
-        .pipe(through.obj((file, enc, cb) => {
+        .pipe(gzip())
+        .pipe(through2.obj((file, enc, cb) => {
             const buf = file.contents;
             file.contents = Buffer.from(genHeader(fileSize, buf, buf.length));
             return cb(null, file);
         }))
         .pipe(rename("html.h"))
         .pipe(dest('../src/'));
-});
+}));
