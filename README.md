@@ -12,7 +12,7 @@ Check_mk is setup to monitor a particular instance of ttyd as it is running in p
 
 TTYD must occasionally be updated by synchronizing with the upstream [code](https://github.com/tsl0922/ttyd). Typically syncrhonizing the Javascript package versions found in https://github.com/tsl0922/ttyd/blob/main/html/package.json is sufficient. 
 
-Occasionally, the updates packages introduce breaking changes into the TTYD component, and the underlying code must also be updated. The best way to do this is to copy the upstream repository, then re-add the customizations needed for SLATE described below.
+Occasionally, the updated packages introduce breaking changes into the TTYD component, and the underlying code must also be updated. The best way to do this is to copy in the upstream repository, then re-add the customizations needed for SLATE described below.
 
 Forcing a rebuild of the [container](https://github.com/slateci/container-ttyd), and restarting the [sandbox-portal](https://github.com/slateci/sandbox-portal) will push the updates live.
 
