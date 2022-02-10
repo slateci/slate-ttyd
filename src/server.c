@@ -487,7 +487,7 @@ int main(int argc, char **argv) {
   info.server_string = server_hdr;
 #endif
 #if LWS_LIBRARY_VERSION_NUMBER >= 2001000 && LWS_LIBRARY_VERSION_NUMBER < 4000000
-  info.ws_ping_pong_interval = 5;
+  info.ws_ping_pong_interval = 300;
 #endif
 
   if (strlen(iface) > 0) {
